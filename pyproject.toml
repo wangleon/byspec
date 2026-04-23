@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools >= 75.3.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "byspec"
+version = "0.2"
+authors = [
+  { name="Liang Wang", email="wang.leon@gmail.com" },
+  { name="Deyang Song" },
+  { name="Zichong Zhang" },
+]
+description = "BFOSC and YFOSC Spectra Data Reduction Pipeline"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = { text = "Apache-2.0" }
+
+[project.urls]
+Homepage = "https://github.com/wangleon/byspec"
+Issues = "https://github.com/wangleon/byspec/issues"
