@@ -217,6 +217,312 @@ def correct_overscan(data):
     else:
         raise ValueError
 
+def find_echelle_apertures(data, align_deg, scan_step):
+    data = data.T
+    ny, nx = data.shape
+    allx = np.arange(nx)
+    ally = np.arange(ny)
+
+    logdata = np.log10(np.maximum(data, 1))
+
+    x0 = nx//2
+    x_lst = {-1:[], 1:[]}
+    x1 = x0
+    direction = -1
+    icol = 0
+
+    csec_i1 = -ny//2
+    csec_i2 = ny + ny//2
+    csec_lst  = np.zeros(csec_i2 - csec_i1)
+    csec_nlst = np.zeros(csec_i2 - csec_i1, dtype=np.int32)
+
+    param_lst = {-1:[], 1:[]}
+    nodes_lst = {}
+
+    def forward(x, p):
+        deg = len(p) - 1 # determine the polynomial degree
+        res = p[0]
+        for i in range(deg):
+            res = res*x + p[i+1]
+        return res
+    def forward_der(x, p):
+        deg = len(p)-1  # determine the polynomial degree
+        p_der = [(deg-i)*p[i] for i in range(deg)]
+        return forward(x, p_der)
+    def backward(y, p):
+        x = y
+        for ite in range(20):
+            dy    = forward(x, p) - y
+            y_der = forward_der(x, p)
+            dx = dy/y_der
+            x = x - dx
+            if (abs(dx) < 1e-7).all():
+                break
+        return x
+    def fitfunc(p, interfunc, n):
+        return interfunc(forward(np.arange(n), p[0:-1])) + p[-1]
+    def resfunc(p, interfunc, flux0, mask=None):
+        res_lst = flux0 - fitfunc(p, interfunc, flux0.size)
+        if mask is None:
+            mask = np.ones_like(flux0, dtype=bool)
+        return res_lst[mask]
+    def find_shift(flux0, flux1, deg):
+        #p0 = [1.0, 0.0, 0.0]
+        #p0 = [0.0, 1.0, 0.0, 0.0]
+        #p0 = [0.0, 0.0, 1.0, 0.0, 0.0]
+
+        p0 = [0.0 for i in range(deg+1)]
+        p0[-3] = 1.0
+
+        interfunc = intp.InterpolatedUnivariateSpline(
+                    np.arange(flux1.size), flux1, k=3, ext=3)
+        mask = np.ones_like(flux0, dtype=bool)
+        clipping = 5.
+        for i in range(10):
+            p, _ = opt.leastsq(resfunc, p0, args=(interfunc, flux0, mask))
+            res_lst = resfunc(p, interfunc, flux0)
+            std  = res_lst.std()
+            mask1 = res_lst <  clipping*std
+            mask2 = res_lst > -clipping*std
+            new_mask = mask1*mask2
+            if new_mask.sum() == mask.sum():
+                break
+            mask = new_mask
+        return p, mask
+
+    while(True):
+        nodes_lst[x1] = []
+
+        flux1 = logdata[:,x1]
+        linflux1 = np.median(data[:,x1-2:x1+3], axis=1)
+
+        if icol == 0:
+            flux1_center = flux1
+
+            # the middle column
+            i1 = 0 - csec_i1
+            i2 = ny - csec_i1
+            # stack the linear flux to the stacked cross-section
+            csec_lst[i1:i2] += linflux1
+            csec_nlst[i1:i2] += 1
+
+        else:
+            param, _ = find_shift(flux0, flux1, deg=align_deg)
+            param_lst[direction].append(param[0:-1])
+            ysta, yend = 0., ny-1.
+            for param in param_lst[direction][::-1]:
+                ysta = backward(ysta, param)
+                yend = backward(yend, param)
+            # interpolate the new crosssection
+            ynew = np.linspace(ysta, yend, ny)
+            interfunc = intp.InterpolatedUnivariateSpline(ynew, linflux1, k=3)
+            #
+            ysta_int = int(round(ysta))
+            yend_int = int(round(yend))
+            fnew = interfunc(np.arange(ysta_int, yend_int+1))
+            i1 = ysta_int - csec_i1
+            i2 = yend_int + 1 - csec_i1
+            csec_lst[i1:i2] += fnew
+            csec_nlst[i1:i2] += 1
+
+        x1 += direction*scan_step
+        if x1 <= 10:
+            direction = +1
+            x1 = x0 + direction*scan_step
+            x_lst[direction].append(x1)
+            flux0 = flux1_center
+            icol += 1
+            continue
+        elif x1 >= nx - 10:
+            # scan ends
+            break
+        else:
+            x_lst[direction].append(x1)
+            flux0 = flux1
+            icol += 1
+            continue
+    #
+    i_nonzero = np.nonzero(csec_nlst)[0]
+    istart, iend = i_nonzero[0], i_nonzero[-1]
+    csec_ylst = np.arange(csec_lst.size) + csec_i1
+
+    x = csec_ylst[istart:iend]
+    y = csec_lst[istart:iend]
+    x = x[100:-30]
+    y = y[100:-30]
+    n = y.size
+
+    #########################
+    ## cross-section stacking
+    #fig = plt.figure()
+    #ax1 = fig.add_subplot(211)
+    #ax2 = fig.add_subplot(212)
+    #for x0 in np.arange(nx//2, nx, 100):
+    #    ax1.plot(data[:,x0], lw=0.5)
+    #ax1.set_yscale('log')
+    #ax2.plot(x, y, lw=0.5)
+    #ax2.set_yscale('log')
+    #plt.show()
+
+    ############################
+
+    winmask = np.zeros_like(y, dtype=bool)
+    xnodes = [100, 1100]
+    wnodes = [30, 240]
+    snodes = [20, 220]
+    c1 = np.polyfit(xnodes, wnodes, deg=len(xnodes)-1)
+    c2 = np.polyfit(xnodes, snodes, deg=len(xnodes)-1) 
+    get_winlen = lambda x: np.polyval(c1, x)
+    get_gaplen = lambda x: np.polyval(c2, x)
+    for i1 in np.arange(0, n):
+        winlen = get_winlen(i1)
+        gaplen = get_gaplen(i1)
+        gaplen = max(gaplen, 5)
+        percent = gaplen/winlen*100
+        i2 = i1 + int(winlen)
+        if i2 >= n-1:
+            break
+        v = np.percentile(y[i1:i2], percent)
+        pick = y[i1:i2]>v
+        if (~pick).sum()==0:
+            pick[pick.argmin()] = False
+        idx = np.nonzero(pick)[0]
+        winmask[idx+i1] = True
+
+    bkgmask = ~winmask
+    maxiter = 10
+    for ite in range(maxiter):
+        c = np.polyfit(x[bkgmask], np.log(y[bkgmask]), deg=15)
+        newy = np.polyval(c, x)
+        resy = np.log(y) - newy
+        std = resy[bkgmask].std()
+        newbkgmask = resy < 2*std
+        if newbkgmask.sum() == bkgmask.sum():
+            break
+        bkgmask = newbkgmask
+
+    aper_mask = y > np.exp(newy + 3*std)
+    aper_idx = np.nonzero(aper_mask)[0]
+
+    gap_mask = ~aper_mask
+    gap_idx = np.nonzero(gap_mask)[0]
+
+    max_order_width = 120
+    min_order_width = 3
+
+    order_index_lst = []
+    for group in np.split(aper_idx, np.where(np.diff(aper_idx)>3)[0]+1):
+        i1 = group[0]
+        i2 = group[-1]
+        if i2-i1 > max_order_width or i2-i1<min_order_width:
+            continue
+        chunk = y[i1:i2]
+        m = chunk > (chunk.max()*0.3 + chunk.min()*0.7)
+        i11 = np.nonzero(m)[0][0] + i1
+        i22 = np.nonzero(m)[0][-1] + i1
+        order_index_lst.append((i11, i22))
+
+    norder = len(order_index_lst)
+    order_lst = np.arange(norder)
+    order_cen_lst = np.array([(i1+i2)/2 for i1, i2 in order_index_lst])
+    goodmask = np.zeros(norder, dtype=bool)
+    goodmask[0:10] = True
+
+    ### find good orders
+    #fig3 = plt.figure()
+    #ax31 = fig3.add_subplot(211)
+    #ax32 = fig3.add_subplot(212)
+    #ax31.plot(order_lst[goodmask], order_cen_lst[goodmask], 'o', c='C0')
+    #ax31.plot(order_lst[~goodmask], order_cen_lst[~goodmask], 'o', c='none', mec='C0')
+    for i in range((~goodmask).sum()):
+        fintp = intp.InterpolatedUnivariateSpline(
+                np.arange(goodmask.sum()), order_cen_lst[goodmask], k=3)
+        newcen = fintp(goodmask.sum())
+        #ax31.axhline(newcen, color='k', ls='--')
+        min_order = None
+        min_dist = 9999
+        for iorder, cen in enumerate(order_cen_lst):
+            if abs(cen - newcen) < min_dist:
+                min_dist = abs(cen - newcen)
+                min_order = iorder
+        goodmask[min_order] = True
+        if newcen > order_cen_lst[-1]:
+            break
+    #ax31.plot(order_lst[goodmask], order_cen_lst[goodmask], 'o', c='C0', ms=2)
+
+    # plot co-added cross-order profiles
+    fig2 = plt.figure(dpi=200, figsize=(6, 3.7))
+    ax2 = fig2.add_axes([0.12, 0.13, 0.85, 0.83])
+    ax2.plot(x, y, lw=0.8)
+    #ax2.plot(x[aper_idx], y[aper_idx], 'o', ms=1)
+    ax2.plot(x, np.exp(newy), '-')
+    ax2.set_yscale('log')
+    _y1, _y2 = ax2.get_ylim()
+    for iorder, (i1, i2) in enumerate(order_index_lst):
+        if goodmask[iorder]:
+            color = 'C0'
+        else:
+            color = 'C1'
+        ax2.fill_betweenx([_y1, _y2], x[i1], x[i2], color=color, alpha=0.2, lw=0)
+    ax2.plot(x, np.exp(newy+3*std), '--')
+    ax2.set_ylim(_y1,_y2)
+    ax2.set_xlabel('Y (pixel)')
+    ax2.set_ylabel('Flux')
+
+    # plot all detected orders
+    fig = plt.figure(dpi=200, figsize=(6, 3.7))
+    ax = fig.add_axes([0.12, 0.13, 0.85, 0.83])
+    ax.imshow(np.log10(data), cmap='gray')
+
+    coeff_lst = []
+    for iorder, (i1, i2) in enumerate(order_index_lst):
+        cen = (x[i1] + x[i2])/2
+        xnode_lst = [x0]
+        ynode_lst = [cen]
+        for direction in [-1, 1]:
+            cen1 = cen
+            for icol, param in enumerate(param_lst[direction]):
+                cen1 = forward(cen1, param)
+                xcol = x_lst[direction][icol]
+                xnode_lst.append(xcol)
+                ynode_lst.append(cen1)
+        xnode_lst = np.array(xnode_lst)
+        ynode_lst = np.array(ynode_lst)
+        # resort
+        args = xnode_lst.argsort()
+        xnode_lst = xnode_lst[args]
+        ynode_lst = ynode_lst[args]
+        # fit polynomial with 3rd degree
+        c = np.polyfit(xnode_lst, ynode_lst, deg=3)
+        coeff_lst.append(c)
+
+        if goodmask[iorder]:
+            color = 'C0'
+            ls = '-'
+        else:
+            color = 'C1'
+            ls = '--'
+        # plot node
+        ax.plot(xnode_lst, ynode_lst, 'o', c=color, lw=0.5, ms=2, mew=0)
+        # plot positions
+        ax.plot(allx, np.polyval(c, allx), ls=ls, c=color, lw=0.5)
+
+        #fig0 = plt.figure()
+        #ax01 = fig0.add_subplot(211)
+        #ax02 = fig0.add_subplot(212)
+        #ax01.plot(xnode_lst, ynode_lst, 'o', ms=3)
+        #ax01.plot(allx, np.polyval(c, allx), '-')
+        #ax02.plot(xnode_lst, ynode_lst - np.polyval(c, xnode_lst), 'o', ms=3)
+        #fig0.savefig('order_{}.png'.format(iorder))
+        #plt.close(fig0)
+        
+    ax.set_xlim(0, nx-1)
+    ax.set_ylim(0, ny-1)
+    ax.set_xlabel('X (pixel)')
+    ax.set_ylabel('Y (pixel)')
+
+    return coeff_lst, goodmask, fig, fig2
+
 def get_longslit_sensmap(data):
     ny, nx = data.shape
     allx = np.arange(nx)
@@ -632,6 +938,40 @@ class YFOSC(FOSCReducer):
             if fname.startswith(prefix + str(fileid)):
                 return os.path.join(self.rawdata_path, fname)
         raise ValueError
+
+    def find_echelle_orders(self):
+
+        self.echelle_coeff_lst = {}
+        self.echelle_goodmask = {}
+
+        for conf, flat_data in self.flat.items():
+            if conf[0]!='echelle':
+                continue
+
+            # trim the image
+            data = flat_data[:, 200:-800]
+
+            # find the apertures
+            result = find_echelle_apertures(data, 
+                                scan_step=50, align_deg=3)
+            coeff_lst = result[0]
+            goodmask  = result[1]
+            fig_orders = result[2]
+            fig_section = result[3]
+
+            conf_string = self.get_conf_string(conf)
+
+            figfilename = 'echelle_orders_{}.png'.format(conf_string)
+            fig_orders.savefig(figfilename)
+            plt.close(fig_orders)
+
+            figfilename = 'echelle_sections_{}.png'.format(conf_string)
+            fig_section.savefig(figfilename)
+            plt.close(fig_section)
+
+            self.echelle_coeff_lst[conf] = coeff_lst
+            self.echelle_goodmask[conf] = goodmask
+
 
     def plot_bias(self, show=True, figname=None):
         for ccdconf, ccdimg in self.bias.items():

@@ -7,6 +7,7 @@ import numpy as np
 import scipy.interpolate as intp
 import scipy.optimize as opt
 import scipy.signal as sg
+from scipy.ndimage.filters import median_filter
 from astropy.table import Table, Row
 import astropy.io.fits as fits
 import matplotlib.pyplot as plt
@@ -558,20 +559,6 @@ class BFOSC(FOSCReducer):
                 return os.path.join(self.rawdata_path, fname)
         raise ValueError
 
-
-    def has_echelle(self):
-        for logitem in self.logtable:
-            if logitem['mode']=='echelle':
-                return True
-        return False
-
-    def has_longslit(self):
-        for logitem in self.logtable:
-            if logitem['mode']=='longslit':
-                return True
-        return False
-
-
     def get_bias(self):
 
         self.get_all_ccdconf()
@@ -726,11 +713,11 @@ class BFOSC(FOSCReducer):
 
             conf_string = self.get_conf_string(conf)
 
-            figfilename = 'echelle_orders_{}.pdf'.format(conf_string)
+            figfilename = 'echelle_orders_{}.png'.format(conf_string)
             fig_orders.savefig(figfilename)
             plt.close(fig_orders)
 
-            figfilename = 'echelle_sections_{}.pdf'.format(conf_string)
+            figfilename = 'echelle_sections_{}.png'.format(conf_string)
             fig_section.savefig(figfilename)
             plt.close(fig_section)
 
@@ -871,6 +858,121 @@ class BFOSC(FOSCReducer):
                 fits.writeto(sens_filename, sensmap, overwrite=True)
                 self.sensmap[conf] = sensmap
 
+    def extract_echelle(self, logitem):
+
+        ccdconf = self.get_ccdconf(logitem)
+        conf = self.get_conf(logitem)
+
+        fileid = logitem['fileid']
+        filename = self.fileid_to_filename(fileid)
+        data, header = fits.getdata(filename, header=True)
+
+        data = data - self.bias[ccdconf]
+        # trim image
+        data = data[800:, :]
+        data = data / self.echelle_sens[conf]
+
+        ny, nx = data.shape
+        allx = np.arange(nx)
+        ally = np.arange(ny)
+        yy, xx = np.mgrid[:ny:, :nx:]
+
+        echelle_coeff_lst = self.echelle_coeff_lst[conf]
+        echelle_goodmask  = self.echelle_goodmask[conf]
+
+        order_mask = np.zeros_like(data, dtype=bool)
+
+        win = 8
+        for coeff in echelle_coeff_lst:
+            cen_lst = np.polyval(coeff, allx)
+            mask = (yy<cen_lst+win) * (yy>cen_lst-win)
+            order_mask += mask
+
+        background = np.zeros_like(data, dtype=np.float32)
+        fig = plt.figure()
+        ax = fig.gca()
+        for x in allx:
+            section = data[:, x]
+            m = order_mask[:, x]
+
+            xdata = ally[~m]
+            ydata = section[~m]
+
+            mask = np.ones_like(xdata, dtype=bool)
+            for i in range(5):
+                c = np.polyfit(xdata[mask], ydata[mask], deg=3)
+                yfit = np.polyval(c, xdata)
+                res_lst = ydata - yfit
+                std = res_lst[mask].std()
+                newmask = (res_lst > -3*std) * (res_lst < 3*std)
+                if newmask.sum()==mask.sum():
+                    break
+                mask = newmask
+            background[:, x] = np.polyval(c, ally)
+
+            if x%100==0:
+                color = 'C{}'.format(x%99%10)
+                ax.plot(ally[~m], section[~m]+x/5, '-',
+                        lw=0.5, alpha=0.2, c=color)
+                ax.plot(ally[~m][mask], section[~m][mask]+x/5, '-',
+                        lw=0.5, alpha=1, c=color)
+                ax.plot(ally, np.polyval(c, ally)+x/5, '--',
+                        lw=0.5, c=color)
+
+        background = median_filter(background, size=(9,5), mode='nearest')
+        background = savgol_filter_2d(background, window_length=(21, 51),
+                        order=3, mode='nearest')
+
+        bkgdata = data*(~order_mask)
+        
+
+        # generate background figure
+        fig1 = plt.figure(figsize=(15, 6), dpi=200)
+        ax1  = fig1.add_axes([0.06, 0.13, 0.44, 0.87])
+        ax2  = fig1.add_axes([0.53, 0.13, 0.44, 0.87])
+        ax1c = fig1.add_axes([0.06, 0.1, 0.44, 0.02])
+        ax2c = fig1.add_axes([0.53, 0.1, 0.44, 0.02])
+        #ax1.imshow(bkgdata, vmin=np.percentile(bkgdata, 5),
+        #                    vmax=np.percentile(bkgdata, 95))
+        cax1 = ax1.imshow(data, cmap='gray', origin='lower',
+                        vmin=np.percentile(data, 1),
+                        vmax=np.percentile(data, 95))
+        bbox = ax1.get_position()
+        #ax1c.set_position([0.92, bbox.y0, 0.02, bbox.height])
+        fig1.colorbar(cax1, cax=ax1c, orientation='horizontal')
+        for coeff in echelle_coeff_lst:
+            cen_lst = np.polyval(coeff, allx)
+            upper = cen_lst + win
+            m = (upper>0)*(upper<ny)
+            ax1.plot(allx[m], upper[m], '-', lw=0.4, c='C0')
+            lower = cen_lst - win
+            m = (lower>0)*(lower<ny)
+            ax1.plot(allx[m], lower[m], '-', lw=0.4, c='C0')
+        ax1.set_xlim(0, nx-1)
+        ax1.set_ylim(0, ny-1)
+        cax2 = ax2.imshow(background, cmap='gray', origin='lower')
+        bbox = ax2.get_position()
+        #ax2c.set_position([0.92, bbox.y0, 0.02, bbox.height])
+        cax2 = fig1.colorbar(cax2, cax=ax2c, orientation='horizontal')
+        ax1.set_xlabel('X (pixel)')
+        ax1.set_ylabel('Y (pixel)')
+        ax2.set_xlabel('X (pixel)')
+        #ax2.set_ylabel('Y (pixel)')
+        ax2.set_yticklabels([])
+        fig1.suptitle('Background for {} ({})'.format(fileid, logitem['object']))
+        figname = 'background_{}.png'.format(fileid)
+        fig1.savefig(figname)
+        plt.close(fig1)
+
+        # correct background
+        data = data - background
+
+    def extract_echelle_targets(self):
+        func = lambda item: item['datatype']=='SPECSTARGET'
+        logitem_lst = list(filter(func, self.logtable))
+        for logitem in logitem_lst:
+            self.extract_echelle(logitem)
+
 
     def extract_echelle_lamp(self):
 
@@ -946,10 +1048,13 @@ class BFOSC(FOSCReducer):
 
     def ident_echelle_wavelength(self):
         self.echelle_wave = {}
-        self.echelle_ident = {}
+        #self.echelle_ident = {}
 
         index_file = os.path.join(os.path.dirname(__file__),
                                   'data/calib/wlcalib_bfosc.dat')
+
+
+        wlcalib_result_lst = {}
 
         for logitem in self.logtable:
             if logitem['mode']!='echelle' or logitem['datatype']!='SPECSLAMP':
@@ -975,7 +1080,6 @@ class BFOSC(FOSCReducer):
                     window=15, xdeg=3, ydeg=3, clipping=3, q_threshold=10)
 
 
-            
             fig_lbl_lst = result['fig_fitlbl']
             for ifig, fig_lbl in enumerate(fig_lbl_lst):
                 figname = 'linefit_lbl_{}_{:02d}.png'.format(
@@ -984,13 +1088,33 @@ class BFOSC(FOSCReducer):
                 plt.close(fig_lbl)
 
             fig_sol = result['fig_solution']
+            title = '{} ({})'.format(fileid, lamp)
+            fig_sol.suptitle(title)
             figname = 'wlcalib_{}.png'.format(fileid)
-            figname = 'wlcalib_{}.pdf'.format(fileid)
             figfilename = os.path.join('./', figname)
             fig_sol.savefig(figfilename)
             plt.close(fig_sol)
-            
 
+            wlcalib_result_lst[fileid] = result
+            
+        ## pick up the best result
+        most_lines, most_orders, least_std = 0, 0, 999
+        for fileid, result in sorted(wlcalib_result_lst.items()):
+            if result['nlines'] > most_lines:
+                most_lines = result['nlines']
+                most_lines_id = fileid
+            if result['norders'] > most_orders:
+                most_orders = result['norders']
+                most_orders_id = fileid
+            if result['std'] < least_std:
+                least_std = result['std']
+                least_std_id = fileid
+        if most_lines_id == most_orders_id and most_orders_id == least_std_id:
+            adopted_fileid = most_lines_id
+        else:
+            adopted_fileid = least_std_id
+
+        self.echelle_wave = wlcalib_result_lst[adopted_fileid]['wavelength']
 
 
     def extract_lamp(self):
@@ -1205,18 +1329,17 @@ class BFOSC(FOSCReducer):
             plt.close(fig1)
             #fig3d.suptitle('Distortion of {}'.format(fileid))
             fig3d.suptitle('BFOSC')
-            fig3d.savefig('distortion3d_{}.pdf'.format(fileid))
             fig3d.savefig('distortion3d_{}.png'.format(fileid))
             plt.close(fig3d)
 
             # plot distortion map
             fig = distortion.plot(times=10)
             fig.suptitle('BFOSC', fontsize=13)
-            fig.savefig('distortion_bfosc.pdf')
             fig.savefig('distortion_bfosc.png')
             plt.close(fig)
 
             newdata = distortion.correct_image(data)
+            fits.writeto('distcorr_{}.fits'.format(fileid), newdata, overwrite=True)
 
             #fig = plt.figure()
             #ax1 = fig.add_subplot(121)

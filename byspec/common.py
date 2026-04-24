@@ -117,6 +117,18 @@ class FOSCReducer(object):
                             logitem['object']==arg]
         return item_lst
 
+    def has_echelle(self):
+        for logitem in self.logtable:
+            if logitem['mode']=='echelle':
+                return True
+        return False
+
+    def has_longslit(self):
+        for logitem in self.logtable:
+            if logitem['mode']=='longslit':
+                return True
+        return False
+
     def get_barycorr(self, ra, dec, obstime):
         loc = EarthLocation.from_geodetic(
                 lat     = self.latitude*u.deg,
@@ -538,7 +550,7 @@ def find_longslit_wavelength(spec, ref_wave, ref_flux, shift_range, linelist,
     pixel_lst = np.arange(n)
 
     hwin = int(window/2)
-    
+
     for iline, line in enumerate(linelist):
         pix1 = f_wave_to_pix(line['wave_air']) + shift
         cint1 = int(round(pix1))
@@ -830,7 +842,7 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
     figccf = plt.figure()
     axccf = figccf.gca()
 
-    fig_sol = plt.figure(dpi=150, figsize=(10,5))
+    fig_sol = plt.figure(dpi=200, figsize=(10,5))
     axsol = fig_sol.add_axes([0.08, 0.10, 0.42, 0.85])
     axresx = fig_sol.add_axes([0.58, 0.57, 0.4, 0.38])
     axresy = fig_sol.add_axes([0.58, 0.10, 0.4, 0.38])
@@ -879,7 +891,6 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
             sublinelist[iline]['i1'] = i1
             sublinelist[iline]['i2'] = i2
 
-            
         m = (sublinelist['pixel']>0)*(sublinelist['pixel']<n-1)
         sublinelist = sublinelist[m]
 
@@ -1021,12 +1032,13 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
             wave = np.zeros_like(pixel_lst, dtype=np.float64)
             has_wave = False
 
-        # plot wavelength solutions
+        # plot wavelength solutions and all the emission lines
         color = 'C{}'.format(order%10)
 
+        # plot the emission lines used in the fitting
         if mask.sum()>0:
             # plot wavelength solution of each order
-            axsol.plot(center_lst[mask], wave_lst[mask], 'o',
+            axsol.plot(center_lst[mask], 1/wave_lst[mask], 'o',
                        c=color, ms=4, alpha=0.8, mew=0)
             # plot residuals only when there is a fitting
             if has_wave:
@@ -1034,25 +1046,26 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
                             c=color, ms=4, alpha=0.8, mew=0, lw=0.6)
                 axresy.plot(np.repeat(order, mask.sum()), reswave[mask], 'o',
                             c=color, ms=4, alpha=0.8, mew=0, lw=0.6)
+        # plot the emission lines rejectted
         if (~mask).sum() > 0:
-            axsol.plot(center_lst[~mask], wave_lst[~mask], 'o',
-                       c='none', mec=color, ms=3)
+            axsol.plot(center_lst[~mask], 1/wave_lst[~mask], 'o',
+                       c='none', mec=color, ms=3, mew=0.5)
             # plot residuals only when there is a fitting
             if has_wave:
                 axresx.plot(center_lst[~mask], reswave[~mask], 'o',
                             c='none', mec=color, ms=3, alpha=0.8, mew=0.5)
                 axresy.plot(np.repeat(order, (~mask).sum()), reswave[~mask], 'o',
                             c='none', mec=color, ms=3, alpha=0.8, mew=0.5)
+        # plot the wavelength solution
 
         if (wave > 0).sum()>0:
-            axsol.plot(pixel_lst, wave, '-', c=color, lw=0.5)
+            axsol.plot(pixel_lst, 1/wave, '-', c=color, lw=0.5)
 
 
     all_res_lst = np.array(all_res_lst)
     allstd = all_res_lst.std()
 
     nused = all_res_lst.size
-
 
     # interpolate wavelength
 
@@ -1063,7 +1076,16 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
     axresy.axhline(allstd, ls='--', color='k', lw=0.5)
     axresy.axhline(-allstd, ls='--', color='k', lw=0.5)
 
-
+    # adjust axsol
+    _y1, _y2 = axsol.get_ylim()
+    axsol.set_ylim(_y2, _y1)
+    yticks, ytick_labels = [],[]
+    for _w in range(1000, 20000, 1000):
+        if _y1 < 1/_w < _y2:
+            yticks.append(1/_w)
+            ytick_labels.append(_w)
+    axsol.set_yticks(yticks)
+    axsol.set_yticklabels(ytick_labels)
     axsol.set_xlabel('Pixel')
     axsol.set_ylabel(u'Wavelength (\xc5)')
     axsol.set_xlim(0, n-1)
@@ -1077,18 +1099,28 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
     axresy.set_ylim(-5*allstd, 5*allstd)
     axresx.set_xlim(0, n-1)
 
+    # add text in residual X axes
+    _x1, _x2 = axresx.get_xlim()
+    _y1, _y2 = axresx.get_ylim()
+    axresx.text(0.95*_x1+0.05*_x2, 0.1*_y1+0.9*_y2,
+                u'PolyOrder = {}'.format(xdeg))
+    axresx.set_xlim(_x1, _x2)
+    axresx.set_ylim(_y1, _y2)
+
+
+    # add text in residual Y axes
     _x1, _x2 = axresy.get_xlim()
     _y1, _y2 = axresy.get_ylim()
     axresy.text(0.95*_x1+0.05*_x2, 0.1*_y1+0.9*_y2,
-                'N (used) = {}, R.M.S. = {:.4f}'.format(nused, allstd))
+                u'N (used) = {}, R.M.S. = {:.4f} \xc5'.format(nused, allstd))
     axresy.set_xlim(_x1, _x2)
     axresy.set_ylim(_y1, _y2)
 
-    return {#'wavelength': allwave,
+    return {'wavelength': allwave,
             'linelist': linelist,
-            #'std': stdwave,
+            'std': allstd,
+            'norders': len(allwave),    # number of orders that has wavelengths
+            'nlines': nused,
             'fig_solution': fig_sol,
             'fig_fitlbl': fig_lbl_lst,
             }
-
-    #plt.show()
