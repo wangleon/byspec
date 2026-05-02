@@ -1356,13 +1356,13 @@ class BFOSC(FOSCReducer):
             #plt.show()
             self.distortion[conf] = distortion
 
-    def extract_longslit_targets(self):
+    def extract_longslit_targets(self, search_region=(0.2, 0.8)):
         func = lambda item: item['datatype']=='SPECLTARGET'
         logitem_lst = list(filter(func, self.logtable))
         for logitem in logitem_lst:
-            self.extract(logitem)
+            self.extract(logitem, search_region=search_region)
 
-    def extract(self, logitem):
+    def extract(self, logitem, search_region):
 
         # column-by-column figure of optimal extraction
         plot_opt_columns = False
@@ -1387,13 +1387,17 @@ class BFOSC(FOSCReducer):
         allx = np.arange(nx)
         ally = np.arange(ny)
 
-        ymax = data[:, 30:250].mean(axis=1).argmax()
+        y1 = int(ny * search_region[0])
+        y2 = int(ny * search_region[1])
+
+        # search the target from Y=(y1, y2)
+        ymax = data[y1:y2, 30:250].mean(axis=1).argmax() + y1
         result = trace_target(data, ymax, xstep=50, polyorder=3)
         coeff_loc, fwhm_mean, profile_func, tracefig = result[:]
 
         # set and save figures
-        figname = 'trace_{}.pdf'.format(fileid)
-        figfilename = os.path.join('./', figname)
+        figname = 'trace_{}.png'.format(fileid)
+        figfilename = os.path.join(self.figpath, figname)
         title = 'Trace for {} ({})'.format(fileid, logitem['object'])
         #tracefig.suptitle(title)
         tracefig.savefig(figfilename)
@@ -1533,7 +1537,7 @@ class BFOSC(FOSCReducer):
         title = '{} ({})'.format(fileid, logitem['object'])
         figbkg.suptitle(title)
         figname = 'bkg_cross_{}.png'.format(fileid)
-        figfilename = os.path.join('./', figname)
+        figfilename = os.path.join(self.figpath, figname)
         figbkg.savefig(figfilename)
         plt.close(figbkg)
      
@@ -1556,8 +1560,8 @@ class BFOSC(FOSCReducer):
             ax.set_ylabel('Y (pixel)')
         title = '{} ({})'.format(fileid, logitem['object'])
         #fig3.suptitle(title)
-        figname = 'bkg_region_{}.pdf'.format(fileid)
-        figfilename = os.path.join('./', figname)
+        figname = 'bkg_region_{}.png'.format(fileid)
+        figfilename = os.path.join(self.figpath, figname)
         fig3.savefig(figfilename)
         plt.close(fig3)
      
