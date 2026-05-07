@@ -200,7 +200,8 @@ def select_calib_from_database(index_file, lamp, mode, config, dateobs):
 
     return spec, linelist
 
-def find_echelle_apertures(data, align_deg, scan_step):
+def find_echelle_apertures(data, align_deg, scan_step,
+                           crop, max_order_width=120, min_order_width=3):
     ny, nx = data.shape
     allx = np.arange(nx)
     ally = np.arange(ny)
@@ -330,8 +331,9 @@ def find_echelle_apertures(data, align_deg, scan_step):
 
     x = csec_ylst[istart:iend]
     y = csec_lst[istart:iend]
-    x = x[100:-30]
-    y = y[100:-30]
+    i1, i2 = crop
+    x = x[i1:i2]
+    y = y[i1:i2]
     n = y.size
 
     #########################
@@ -388,8 +390,6 @@ def find_echelle_apertures(data, align_deg, scan_step):
     gap_mask = ~aper_mask
     gap_idx = np.nonzero(gap_mask)[0]
 
-    max_order_width = 120
-    min_order_width = 3
 
     order_index_lst = []
     for group in np.split(aper_idx, np.where(np.diff(aper_idx)>3)[0]+1):
@@ -401,6 +401,8 @@ def find_echelle_apertures(data, align_deg, scan_step):
         m = chunk > (chunk.max()*0.3 + chunk.min()*0.7)
         i11 = np.nonzero(m)[0][0] + i1
         i22 = np.nonzero(m)[0][-1] + i1
+        q = (np.log(chunk.max()) - newy[chunk.argmax()+i1])/std
+        #print(i1, i2, i11, i22, i22-i11, q)
         order_index_lst.append((i11, i22))
 
     norder = len(order_index_lst)
@@ -436,7 +438,7 @@ def find_echelle_apertures(data, align_deg, scan_step):
     ax2 = fig2.add_axes([0.12, 0.13, 0.85, 0.83])
     ax2.plot(x, y, lw=0.8)
     #ax2.plot(x[aper_idx], y[aper_idx], 'o', ms=1)
-    ax2.plot(x, np.exp(newy), '-')
+    ax2.plot(x, np.exp(newy), '-', lw=0.5, alpha=0.8)
     ax2.set_yscale('log')
     _y1, _y2 = ax2.get_ylim()
     for iorder, (i1, i2) in enumerate(order_index_lst):
@@ -445,7 +447,9 @@ def find_echelle_apertures(data, align_deg, scan_step):
         else:
             color = 'C1'
         ax2.fill_betweenx([_y1, _y2], x[i1], x[i2], color=color, alpha=0.2, lw=0)
-    ax2.plot(x, np.exp(newy+3*std), '--')
+    ax2.plot(x, np.exp(newy+3*std), '--', lw=0.5, alpha=0.8)
+    ax2.xaxis.set_major_locator(tck.MultipleLocator(200))
+    ax2.xaxis.set_minor_locator(tck.MultipleLocator(50))
     ax2.set_ylim(_y1,_y2)
     ax2.set_xlabel('Y (pixel)')
     ax2.set_ylabel('Flux')
@@ -537,7 +541,7 @@ class BFOSC(FOSCReducer):
     def __init__(self, **kwargs):
         super(BFOSC, self).__init__(**kwargs)
 
-    def make_obslog(self, filename=None):
+    def make_obslog(self, filename=None, autosave=True):
         """Scan the raw data path and generate an observing log.
         """
         logtable = make_obslog(self.rawdata_path, display=True)
@@ -545,12 +549,14 @@ class BFOSC(FOSCReducer):
         # find obsdate
         self.obsdate = logtable[0]['dateobs'][0:10]
 
-        if filename is None:
-            filename = 'BFOSC.{}.txt'.format(self.obsdate)
-        filename = os.path.join(self.reduction_path, filename)
+        if autosave:
+            if filename is None:
+                filename = 'BFOSC.{}.txt'.format(self.obsdate)
+            filename = os.path.join(self.reduction_path, filename)
 
-        logtable.write(filename, format='ascii.fixed_width_two_line',
-                        overwrite=True)
+            logtable.write(filename, format='ascii.fixed_width_two_line',
+                            overwrite=True)
+
         self.logtable = logtable
 
     def fileid_to_filename(self, fileid):
@@ -692,6 +698,29 @@ class BFOSC(FOSCReducer):
         binning, gain, rdnoise = ccdconf
         return '{}_gain{:.1f}_ron{}'.format(binning, gain, rdnoise)
 
+
+
+    def _find_echelle_orders_E9G10(self, data):
+        cropdata = data[800:, :]
+        result = find_echelle_apertures(cropdata,
+                                scan_step=50, align_deg=3,
+                                crop = (100, -30),
+                                max_order_width = 120,
+                                min_order_width = 3,
+                                        )
+        return result
+
+    def _find_echelle_orders_E9G11(self, data):
+        cropdata = data[700:, :]
+        result = find_echelle_apertures(cropdata,
+                                scan_step=50, align_deg=3,
+                                crop = (100, -150),
+                                max_order_width = 120,
+                                min_order_width = 10,
+                                        )
+        return result
+
+
     def find_echelle_orders(self):
 
         self.echelle_coeff_lst = {}
@@ -700,24 +729,27 @@ class BFOSC(FOSCReducer):
             if conf[0]!='echelle':
                 continue
 
-            # trim the image
-            data = flat_data[800:, :]
+            if conf[1] == 'E9+G10':
+                result = self._find_echelle_orders_E9G10(flat_data)
+            elif conf[1] == 'E9+G11':
+                result = self._find_echelle_orders_E9G11(flat_data)
+            else:
+                raise ValueError
 
-            # find apertures
-            result = find_echelle_apertures(data,
-                                scan_step=50, align_deg=3)
-            coeff_lst = result[0]
-            goodmask  = result[1]
-            fig_orders = result[2]
+            coeff_lst   = result[0]
+            goodmask    = result[1]
+            fig_orders  = result[2]
             fig_section = result[3]
 
             conf_string = self.get_conf_string(conf)
 
-            figfilename = 'echelle_orders_{}.png'.format(conf_string)
+            figfilename = os.path.join(self.figpath,
+                            'echelle_orders_{}.png'.format(conf_string))
             fig_orders.savefig(figfilename)
             plt.close(fig_orders)
 
-            figfilename = 'echelle_sections_{}.png'.format(conf_string)
+            figfilename = os.path.join(self.figpath,
+                            'echelle_sections_{}.png'.format(conf_string))
             fig_section.savefig(figfilename)
             plt.close(fig_section)
 
@@ -737,7 +769,12 @@ class BFOSC(FOSCReducer):
             echelle_goodmask  = self.echelle_goodmask[conf]
 
             # trim the image
-            data = flat_data[800:, :]
+            if conf[1] == 'E9+G10':
+                data = flat_data[800:, :]
+            elif conf[1] == 'E9+G11':
+                data = flat_data[700:, :]
+            else:
+                raise ValueError
             ny, nx = data.shape
             allx = np.arange(nx)
             ally = np.arange(ny)
@@ -783,7 +820,6 @@ class BFOSC(FOSCReducer):
                     continue
             
                 spec = (data*mask).sum(axis=0)/10
-                #ax2.plot(spec, lw=0.5)
                
                 #fig0 =plt.figure(dpi=200)
                 #ax0 = fig0.gca()
@@ -801,10 +837,15 @@ class BFOSC(FOSCReducer):
             
                 m = np.ones_like(spec, dtype=bool)
                 m2 = (cen_lst>0)*(cen_lst<ny)
+
+                #ax2.plot(allx[m2],spec[m2], lw=0.5)
+
                 for i in range(3):
                     m = m*m2
                     coeff = np.polyfit(allx[m]/nx, np.log(spec[m]), deg=7)
-                    res_lst = np.log(spec) - np.polyval(coeff, allx/nx)
+
+                    res_lst = np.zeros(nx)
+                    res_lst[m] = np.log(spec[m]) - np.polyval(coeff, allx[m]/nx)
                     std = res_lst[m].std()
                     newm = (res_lst > -3*std) * (res_lst < 3*std)
                     if newm.sum()==m.sum():
@@ -812,6 +853,7 @@ class BFOSC(FOSCReducer):
                     m = newm
                 spec_sm = np.zeros(nx)
                 spec_sm[m2] = np.exp(np.polyval(coeff, allx/nx)[m2])
+                #ax2.plot(allx[m2], spec_sm[m2],ls='--')
             
                 #ax0.plot(allx, spec_sm, lw=0.5)
                 minidx, minvalue = get_local_minima(spec_sm, window=31)
@@ -820,7 +862,12 @@ class BFOSC(FOSCReducer):
                 #plt.close(fig0)
             
                 smooth_2d = np.tile(spec_sm, ny).reshape(ny, -1)
+                #fits.writeto('a.fits', smooth_2d, overwrite=True)
+                negmask = smooth_2d<=0
+                smooth_2d[negmask] = data[negmask]
+                # mask is a 2-D mask array
                 sensmap[mask] = (data/smooth_2d)[mask]
+                #sensmap[mask] = (data/smooth_2d)[mask]
                 #sensmap[:,m2][mask[:,m2]] = (data[:, m2]/smooth_2d)
             
         
@@ -867,10 +914,22 @@ class BFOSC(FOSCReducer):
         filename = self.fileid_to_filename(fileid)
         data, header = fits.getdata(filename, header=True)
 
-        data = data - self.bias[ccdconf]
+        
+        bias_data = self.bias[ccdconf]
+        data = data - bias_data
+        print('  - Bias corrected. mean={:.2f}'.format(bias_data.mean()))
+
         # trim image
-        data = data[800:, :]
+        if conf[1] == 'E9+G10':
+            data = data[800:, :]
+        elif conf[1] == 'E9+G11':
+            data = data[700:, :]
+        else:
+            raise ValueError
+
+
         data = data / self.echelle_sens[conf]
+        print('  - Flat corrected.')
 
         ny, nx = data.shape
         allx = np.arange(nx)
@@ -966,11 +1025,91 @@ class BFOSC(FOSCReducer):
 
         # correct background
         data = data - background
+        print('  - Background corrected. mean={:.2f}'.format(background.mean()))
+
+
+        # find closet wavelength calibration 
+        #mid_time = dateutil.parser.parse(logitem['dateobs']) + \
+        #        datetime.timedelta(seconds=logitem['exptime']/2)
+
+        #timediff_lst = []
+        #calibfileid_lst = []
+        #for _fileid in self.echelle_wave.keys():
+        #    print(_fileid)
+        #    _logitem = self.logtable[self.logtable['fileid']==_fileid][0]
+        #    calib_midtime = dateutil.parser.parse(_logitem['dateobs']) + \
+        #            datetime.timedelta(seconds=_logitem['exptime']/2)
+        #    timediff = mid_time - calib_midtime
+        #    timediff_lst.append(timediff)
+        #    calibfileid_lst.append(_fileid)
+        #argmin = np.argmin(timediff_lst)
+        #calib_fileid = calibfileid_lst[argmin]
+
+        #print('  - Reference wavelength selected: {}'.format(calib_fileid))
+
+        #wave_result = self.echelle_wave[calib_fileid]
+
+        # define dtype of 1-d spectra
+        types = [
+                ('aperture',   np.int16),
+                ('order',      np.int16),
+                ('x',          (np.float32, nx)),
+                ('y',          (np.float32, nx)),
+                ('wavelength', (np.float64, nx)),
+                ('flux',       (np.float32, nx)),
+                ('error',      (np.float32, nx)),
+                ('background', (np.float32, nx)),
+                ('mask',       (np.int32,   nx)),
+                ]
+        names, formats = list(zip(*types))
+        echelle_spectype = np.dtype({'names': names, 'formats': formats})
+
+        # extract 1d sepectra
+
+        spec_lst = []
+        aper = 0
+        for iorder, coeff in enumerate(echelle_coeff_lst):
+            win = 5
+            if not echelle_goodmask[iorder]:
+                continue
+
+            cen_lst = np.polyval(coeff, allx)
+            mask = (yy<cen_lst+win)*(yy>cen_lst-win)
+            spec = (data*mask).sum(axis=0)
+            bkgspec = (background*mask).sum(axis=0)
+
+            order, wave = self.echelle_wave[aper]
+
+            # pack to table
+            row = (aper, order,
+                   allx,                            # x
+                   cen_lst,                         # y
+                   wave,                            # wavelength
+                   spec,                            # flux
+                   np.zeros(nx, dtype=np.float32),  # error
+                   bkgspec,                         # background
+                   np.zeros(nx, dtype=np.int16),    # mask
+                   )
+            spec_lst.append(row)
+            aper += 1
+            
+        spec_lst = np.array(spec_lst, dtype=echelle_spectype)
+
+        hdulst = fits.HDUList([fits.PrimaryHDU(header=header),
+                               fits.BinTableHDU(data=spec_lst),
+                               ])
+        filename = os.path.join(self.odspath,
+                                'spec_{}.fits'.format(fileid))
+        hdulst.writeto(filename, overwrite=True)
+        print('  - 1D spectra saved as {}'.format(filename))
+
 
     def extract_echelle_targets(self):
         func = lambda item: item['datatype']=='SPECSTARGET'
         logitem_lst = list(filter(func, self.logtable))
         for logitem in logitem_lst:
+            fileid = logitem['fileid']
+            print('* FileID: {} - 1d spectra extraction'.format(fileid))
             self.extract_echelle(logitem)
 
 
@@ -1008,7 +1147,12 @@ class BFOSC(FOSCReducer):
 
             data = data - self.bias[ccdconf]
             # trim image
-            data = data[800:, :]
+            if conf[1] == 'E9+G10':
+                data = data[800:, :]
+            elif conf[1] == 'E9+G11':
+                data = data[700:, :]
+            else:
+                raise ValueError
             data = data / self.echelle_sens[conf]
 
             ny, nx = data.shape
@@ -1098,22 +1242,30 @@ class BFOSC(FOSCReducer):
             wlcalib_result_lst[fileid] = result
             
         ## pick up the best result
-        most_lines, most_orders, least_std = 0, 0, 999
+        fileid_lst  = []
+        norders_lst = []
+        nlines_lst  = []
+        std_lst     = []
         for fileid, result in sorted(wlcalib_result_lst.items()):
-            if result['nlines'] > most_lines:
-                most_lines = result['nlines']
-                most_lines_id = fileid
-            if result['norders'] > most_orders:
-                most_orders = result['norders']
-                most_orders_id = fileid
-            if result['std'] < least_std:
-                least_std = result['std']
-                least_std_id = fileid
-        if most_lines_id == most_orders_id and most_orders_id == least_std_id:
-            adopted_fileid = most_lines_id
-        else:
-            adopted_fileid = least_std_id
+            fileid_lst.append(fileid)
+            norders_lst.append(result['norders'])
+            nlines_lst.append(result['nlines'])
+            std_lst.append(result['std'])
 
+        std_lst = np.array(std_lst)
+
+        # find the calibfile with the most number of orders, lines, and least
+        # std
+        tab = Table()
+        tab.add_column(fileid_lst, name='fileid')
+        tab.add_column(norders_lst, name='norders')
+        tab.add_column(nlines_lst, name='nlines')
+        tab.add_column(std_lst, name='std')
+        tab.add_column(1/std_lst, name='r_std')
+        tab.sort(['norders', 'nlines', 'r_std'])
+
+        # select the fileid with the largest number of orders
+        adopted_fileid = tab[-1]['fileid']
         self.echelle_wave = wlcalib_result_lst[adopted_fileid]['wavelength']
 
 
@@ -1375,13 +1527,19 @@ class BFOSC(FOSCReducer):
         ccd_ron  = logitem['rdnoise']
         filename = self.fileid_to_filename(fileid)
         data, head = fits.getdata(filename, header=True)
-        data = data - self.bias[ccdconf]
+
+        print('* FileID: {} - 1d spectra extraction'.format(fileid))
+
+        bias_data = self.bias[ccdconf]
+        data = data - bias_data
+        print('  - Bias corrected. mean={:.2f}'.format(bias_data.mean()))
+
         data = data / self.sensmap[conf]
+        print('  - Flat corrected.')
 
         distortion = self.distortion[conf]
         data = distortion.correct_image(data)
-
-        print('* FileID: {} - 1d spectra extraction'.format(fileid))
+        print('  - Distortion corrected.')
 
         ny, nx = data.shape
         allx = np.arange(nx)
@@ -1394,6 +1552,7 @@ class BFOSC(FOSCReducer):
         ymax = data[y1:y2, 30:250].mean(axis=1).argmax() + y1
         result = trace_target(data, ymax, xstep=50, polyorder=3)
         coeff_loc, fwhm_mean, profile_func, tracefig = result[:]
+        print('  - Target found. mean FWHM={:.3f}'.format(fwhm_mean))
 
         # set and save figures
         figname = 'trace_{}.png'.format(fileid)
@@ -1402,6 +1561,7 @@ class BFOSC(FOSCReducer):
         #tracefig.suptitle(title)
         tracefig.savefig(figfilename)
         plt.close(tracefig)
+        print('  - Trace figure saved as {}'.format(figfilename))
 
         # find closet wavelength calibration 
         mid_time = dateutil.parser.parse(logitem['dateobs']) + \
@@ -1540,6 +1700,7 @@ class BFOSC(FOSCReducer):
         figfilename = os.path.join(self.figpath, figname)
         figbkg.savefig(figfilename)
         plt.close(figbkg)
+        print('  - Backgronud cross-section figure saved as {}'.format(figfilename))
      
         # plot a 2d image of distortion corrected image
         # and background region
@@ -1564,6 +1725,7 @@ class BFOSC(FOSCReducer):
         figfilename = os.path.join(self.figpath, figname)
         fig3.savefig(figfilename)
         plt.close(fig3)
+        print('  - Background figure saved as {}'.format(figfilename))
      
         # background spectra per pixel along spatial direction
         bkgspec = (data * bkgmask).sum(axis=0) / (bkgmask.sum(axis=0))
@@ -1574,6 +1736,8 @@ class BFOSC(FOSCReducer):
 
         ####### optimal extraction ##########
         debkg_data = data - np.repeat([bkgspec], ny, axis=0)
+
+        #debug_file = open('debug_file.dat', 'w')
 
         fitprof_func = lambda p, x: p[0] * profile_func(x) + p[1]
         f_opt_lst = []
@@ -1615,7 +1779,9 @@ class BFOSC(FOSCReducer):
                 w2 = w1 - 0.025
                 h1 = 0.96 / nrow
                 h2 = h1 - 0.025
-                ax = fig.add_axes([0.05 + icol * w1, 0.05 + (nrow - irow - 1) * h1, w2, h2])
+                ax = fig.add_axes([0.05 + icol * w1,
+                                   0.05 + (nrow - irow - 1) * h1,
+                                   w2, h2])
                 ax.scatter(fitx, flux, c='w', edgecolor='C0', s=15)
                 ax.scatter(fitx[mask], flux[mask], c='C0', s=15)
                 newx = np.arange(y1, y2 + 1e-3, 0.1) - ycenint
@@ -1624,7 +1790,8 @@ class BFOSC(FOSCReducer):
                 ax.plot(newx, newy + std, ls='--', color='C1')
                 ax.plot(newx, newy - std, ls='--', color='C1')
                 ylim1, ylim2 = ax.get_ylim()
-                ax.text(0.95 * fitx[0] + 0.05 * fitx[-1], 0.1 * ylim1 + 0.9 * ylim2,
+                ax.text(0.95 * fitx[0] + 0.05 * fitx[-1],
+                        0.1 * ylim1 + 0.9 * ylim2,
                         'X = {:4d}'.format(x))
                 ax.axvline(x=0, c='k', ls='--', lw=0.5)
                 ax.set_ylim(ylim1, ylim2)
@@ -1641,6 +1808,13 @@ class BFOSC(FOSCReducer):
             s_lst = 1 / (np.maximum(flux * ccd_gain, 0) + ccd_ron ** 2)
             profile = profile_func(fitx)
             normpro = profile / profile.sum()
+
+            #debug_file.write('x={}'.format(x)+os.linesep)
+            #for _f, _s, _p, _m in zip(flux, s_lst, normpro, mask):
+            #    debug_file.write(
+            #            '{:16.8e} {:16.8e} {:16.8e} {:1d}'.format(_f, _s, _p, _m)+os.linesep)
+
+
             fopt = ((s_lst * normpro * debkg_flux)[mask].sum()) / \
                    ((s_lst * normpro ** 2)[mask].sum())
   
@@ -1649,6 +1823,9 @@ class BFOSC(FOSCReducer):
                    ((s_lst * normpro ** 2)[mask].sum())
             f_opt_lst.append(fopt)
             b_opt_lst.append(bopt)
+
+        #debug_file.close()
+
         f_opt_lst = np.array(f_opt_lst)
         b_opt_lst = np.array(b_opt_lst)
   
@@ -1709,6 +1886,130 @@ class BFOSC(FOSCReducer):
                                fits.BinTableHDU(data=data),
                                ])
         hdulst.writeto(filename, overwrite=True)
+
+        print('  - 1D spectra saved as {}'.format(filename))
+
+    def _plot_onedspec(self, logitem):
+
+        if logitem['mode'] == 'echelle':
+            _plot_onedspec_echelle(logitem)
+
+        elif logitem['mode'] == 'longslit':
+            _plot_onedspec_longslit(logitem)
+
+        else:
+            return
+
+
+    def _plot_onedspec_echelle(self, logitem):
+        fileid = logitem['fileid']
+        ods_filename = os.path.join(self.odspath,
+                                    'spec_{}.fits'.format(fileid))
+        if not os.path.exists(ods_filename):
+            return
+
+        fig = plt.figure(dpi=150, figsize=(10, 6))
+        ax = fig.gca()
+        hdulst = fits.open(ods_filename)
+        tab = hdulst[1].data
+        hdulst.close()
+        allflux = []
+        w1, w2 = 1e9, 0
+        for row in tab:
+            for _v in row['flux']:
+                allflux.append(_v)
+            # find minimum wavelength and maximum wavelength
+            w1 = min(w1, row['wavelength'].min())
+            w2 = max(w2, row['wavelength'].max())
+
+        y2 = np.percentile(allflux, 99.5)
+
+        ax.plot([0,0], [0, y2], '-', alpha=0)
+        _y1, _y2 = ax.get_ylim()
+
+        for row in tab:
+            ax.plot(row['wavelength'], row['flux'], lw=0.5)
+        ax.set_ylim(_y1, _y2)
+        ax.set_xlim(w1, w2)
+        ax.set_xlabel(u'Wavelength (\xc5)')
+
+    def _plot_onedspec_longslit(self, logitem):
+        fileid = logitem['fileid']
+        ods_filename = os.path.join(self.odspath,
+                                    'spec_{}.fits'.format(fileid))
+        if not os.path.exists(ods_filename):
+            return
+
+        fig = plt.figure(dpi=150, figsize=(10, 6))
+        ax = fig.gca()
+        hdulst = fits.open(ods_filename)
+        tab = hdulst[1].data
+        hdulst.close()
+        wave = tab['wavelength']
+        flux = tab['flux_opt']
+        ax.plot(wave, flux, '-', lw=0.5)
+        w1 = wave.min()
+        w2 = wave.max()
+        ax.set_xlim(w1, w2)
+        ax.set_xlabel(u'Wavelength (\xc5)')
+
+    def plot1d(self, *args):
+        for arg in args:
+            if arg in self.logtable['frameid']:
+                m = self.logtable['frameid']==arg
+                logitem = self.logtable[m][0]
+                self._plot_onedspec(logitem)
+            elif arg in self.logtable['fileid']:
+                m = self.logtable['fileid']==arg
+                logitem = self.logtable[m][0]
+                self._plot_onedspec(logitem)
+        plt.show()
+
+    def _convert1d(self, logitem, filename):
+        if logitem['mode'] == 'echelle':
+            _convert_onedspec_echelle(logitem)
+
+        elif logitem['mode'] == 'longslit':
+            _convert_onedspec_longslit(logitem)
+
+        else:
+            return
+
+    def _convert_onedspec_echelle(self, logitem, filename):
+        fileid = logitem['fileid']
+        ods_filename = os.path.join(self.odspath,
+                                    'spec_{}.fits'.format(fileid))
+        if not os.path.exists(ods_filename):
+            return
+
+        hdulst = fits.open(ods_filename)
+        tab = hdulst[1].data
+        hdulst.close()
+
+    def _convert_onedspec_longslit(self, logitem, filename):
+        fileid = logitem['fileid']
+        ods_filename = os.path.join(self.odspath,
+                                    'spec_{}.fits'.format(fileid))
+        if not os.path.exists(ods_filename):
+            return
+
+        #####
+        hdulst = fits.open(ods_filename)
+        tab = hdulst[1].data
+        hdulst.close()
+
+
+    def convert1d(self, *args, filename='spec_{FILEID}.txt'):
+        for arg in args:
+            if arg in self.logtable['frameid']:
+                m = self.logtable['frameid']==arg
+                logitem = self.logtable[m][0]
+                self._convert1d(logitem, filename)
+            elif arg in self.logtable['fileid']:
+                m = self.logtable['fileid']==arg
+                logitem = self.logtable[m][0]
+                self._convert1d(logitem, filename)
+
 
 def errfunc(p, x, y, fitfunc):
     return y - fitfunc(p, x)

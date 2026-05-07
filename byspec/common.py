@@ -47,6 +47,9 @@ class FOSCReducer(object):
         if not os.path.exists(self.figpath):
             os.mkdir(self.figpath)
 
+        self.odspath = os.path.join(self.reduction_path, 'onedspec')
+        if not os.path.exists(self.odspath):
+            os.mkdir(self.odspath)
         #self.bias_file = os.path.join(self.reduction_path, 'bias.fits')
         #self.flat_file = os.path.join(self.reduction_path, 'flat.fits')
         #self.sens_file = os.path.join(self.reduction_path, 'sens.fits')
@@ -1024,7 +1027,7 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
                     break
             # get wavelength of each pixel in this order
             wave = np.polyval(coeff_wave, pixel_lst)
-            allwave[order] = wave
+            allwave[irow] = (order, wave)
             has_wave = True
             for res in reswave[mask]:
                 all_res_lst.append(res)
