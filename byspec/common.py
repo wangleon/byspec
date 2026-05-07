@@ -1,4 +1,6 @@
 import os
+
+from pathlib import Path
 import numpy as np
 from astropy.table import Table
 from astropy.time import Time
@@ -26,8 +28,11 @@ class FOSCReducer(object):
             self.set_reduction_path(reduction_path)
 
         obslogfile = kwargs.pop('obslog', None)
-        if obslogfile is not None:
+        if obslogfile is not None and os.path.exists(obslogfile):
+            self.obslogfile = obslogfile
             self.read_obslog(obslogfile)
+
+
 
     def set_rawdata_path(self, rawdata_path):
         """Set rawdata path.
@@ -819,7 +824,62 @@ def find_longslit_wavelength(spec, ref_wave, ref_flux, shift_range, linelist,
             'fig_fitlbl': fig_lbl_lst,
             }
 
+
+def find_cross_order_shift(spec, ref_spec, shift_lst, ordshift_range):
+
+    # prepare CCF figure
+    fig_ccf = plt.figure(figsize=(8, 5), dpi=200, tight_layout=True)
+
+    oshift1, oshift2 = ordshift_range
+    oshift_lst = np.arange(oshift1, oshift2+1)
+    nshift = oshift_lst.size
+    if nshift <= 4:
+        nrow, ncol = 2, 2
+    elif nshift <= 6:
+        nrow, ncol = 2, 3
+    elif nshift <= 8:
+        nrow, ncol = 2, 4
+    else:
+        nrow, ncol = 3, 4
+
+    shift_disp_lst = {}
+    shift_mean_lst = {}
+    all_order_shift_lst = {}
+    for ishift, _oshift in enumerate(oshift_lst):
+        ax_ccf = fig_ccf.add_subplot(nrow, ncol, ishift+1)
+        order_shift_lst = []
+        for irow in np.arange(len(spec)):
+            irow2 = irow + _oshift
+
+            if irow2 < 0 or irow2 >= len(ref_spec):
+                # in case irow2 excess the range of ref_spec, skip.
+                continue
+
+            flux = spec[irow]['flux']
+            ref_flux = ref_spec[irow2]['flux']
+
+            ccf_lst = get_simple_ccf(flux, ref_flux, shift_lst)
+            # plot this CCF
+            ax_ccf.plot(shift_lst, ccf_lst, '-', lw=0.5, alpha=0.8)
+
+            shift = shift_lst[ccf_lst.argmax()]
+            order_shift_lst.append(shift)
+        order_shift_lst = np.array(order_shift_lst)
+        all_order_shift_lst[_oshift] = order_shift_lst
+        shift_disp_lst[_oshift] = np.std(order_shift_lst)
+        shift_mean_lst[_oshift] = np.mean(order_shift_lst)
+        # set axes title
+        ax_ccf.set_title('ordshift = {}'.format(_oshift), fontsize=8)
+
+    result = sorted(shift_disp_lst.items(), key=lambda i: i[1])[0]
+    oshift = result[0]
+    order_shift_lst = all_order_shift_lst[oshift]
+
+    return oshift, order_shift_lst, fig_ccf
+
+
 def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
+        ordshift_range=(-2,2),
         window=15, xdeg=4, ydeg=4, clipping=3, q_threshold=10):
     
     def errfunc(p, x, y, fitfunc):
@@ -837,13 +897,17 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
     allwave = {}
     all_res_lst = []
 
+    # find cross-order shift
+    oshift, order_shift_lst, fig_ccf = find_cross_order_shift(
+            spec, ref_spec, shift_lst, ordshift_range)
+
+
+    ################################
+
     # initialize line-by-line figure
     fig_lbl_lst = []
     nrow, ncol = 6, 7       # the number of sub-axes in every figure
     count_line = 0  # fitting counter
-
-    figccf = plt.figure()
-    axccf = figccf.gca()
 
     fig_sol = plt.figure(dpi=200, figsize=(10,5))
     axsol = fig_sol.add_axes([0.08, 0.10, 0.42, 0.85])
@@ -851,14 +915,15 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
     axresy = fig_sol.add_axes([0.58, 0.10, 0.4, 0.38])
 
     for irow in np.arange(len(spec)):
-        ccf_lst = get_simple_ccf(spec[irow]['flux'],
-                                 ref_spec[irow]['flux'], shift_lst)
-        axccf.plot(shift_lst, ccf_lst, '-', lw=0.5, alpha=0.7)
+        irow2 = irow + oshift
 
-        shift = shift_lst[ccf_lst.argmax()]
+        shift = order_shift_lst[irow]
 
-        ref_wave = ref_spec[irow]['wavelength']
-        ref_flux  = ref_spec[irow]['flux']
+        if irow2 < 0 or irow2 >= len(ref_spec):
+            continue
+
+        ref_wave = ref_spec[irow2]['wavelength']
+        ref_flux  = ref_spec[irow2]['flux']
         ref_pixel = np.arange(ref_wave.size)
 
         # construct an interpolate function that converts wavelength to pixel
@@ -873,7 +938,7 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
         f_wave_to_pix = intp.InterpolatedUnivariateSpline(
                 ref_wave, ref_pixel, k=3)
 
-        order = ref_spec[irow]['order']
+        order = ref_spec[irow2]['order']
         sublinelist = linelist[linelist['order']==order]
         sublinelist.add_column([-1]*len(sublinelist), index=-1, name='pixel')
         sublinelist.add_column([-1]*len(sublinelist), index=-1, name='i1')
@@ -909,8 +974,9 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
             i1 = line['i1']
             i2 = line['i2']
             ic = line['pixel']
-            # add background level
+            xdata = np.arange(i1, i2)
             ydata = spec[irow]['flux'][i1:i2]
+            # add background level
             p0 = [ydata.min()]
             p0.append(spec[irow]['flux'][ic]-ydata.min())
             p0.append(3.6)
@@ -920,12 +986,36 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
             lower_bounds = [-np.inf, 0,      0.5, 0.1, i1]
             upper_bounds = [np.inf,  np.inf, 20,   20, i2]
 
-            xdata = np.arange(i1, i2)
             fitres = opt.least_squares(errfunc, p0,
                         bounds=(lower_bounds, upper_bounds),
                         args=(xdata, ydata, fitline),
             )
 
+            param = fitres['x']
+
+            # now run a second round by adjusting the center
+            ic = param[4]
+            cint1 = int(round(ic))
+            i1, i2 = cint1 - hwin, cint1 + hwin+1
+            i1 = max(i1, 0)
+            i2 = min(i2, n-1)
+            xdata = np.arange(i1, i2)
+            ydata = spec[irow]['flux'][i1:i2]
+            # add background level
+            p0 = [ydata.min()]
+            p0.append(spec[irow]['flux'][cint1]-ydata.min())
+            p0.append(param[2])
+            p0.append(param[3])
+            p0.append(ic)
+            # set lower and upper bounds
+            lower_bounds = [-np.inf, 0,      0.5, 0.1, i1]
+            upper_bounds = [np.inf,  np.inf, 20,   20, i2]
+
+            # fit
+            fitres = opt.least_squares(errfunc, p0,
+                        bounds=(lower_bounds, upper_bounds),
+                        args=(xdata, ydata, fitline),
+            )
             param = fitres['x']
 
             fmt_str = (' - {:2s} {:3s} {:10.4f}: {:4d}-{:4d} '
@@ -1126,4 +1216,5 @@ def find_echelle_wavelength(spec, ref_spec, shift_range, linelist,
             'nlines': nused,
             'fig_solution': fig_sol,
             'fig_fitlbl': fig_lbl_lst,
+            'fig_ccf': fig_ccf,
             }

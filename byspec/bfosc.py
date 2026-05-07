@@ -3,6 +3,7 @@ import re
 import datetime
 import dateutil.parser
 
+import yaml
 import numpy as np
 import scipy.interpolate as intp
 import scipy.optimize as opt
@@ -1078,6 +1079,11 @@ class BFOSC(FOSCReducer):
             spec = (data*mask).sum(axis=0)
             bkgspec = (background*mask).sum(axis=0)
 
+            if aper not in self.echelle_wave:
+                # aper excess the range of echelle_wave
+                aper += 1
+                continue
+
             order, wave = self.echelle_wave[aper]
 
             # pack to table
@@ -1223,14 +1229,23 @@ class BFOSC(FOSCReducer):
             result = find_echelle_wavelength(spec, ref_spec, (-50,50), linelist,
                     window=15, xdeg=3, ydeg=3, clipping=3, q_threshold=10)
 
+            # save ccf figure
+            fig_ccf = result['fig_ccf']
+            figname = 'wlccf_{}.png'.format(fileid)
+            figfilename = os.path.join(self.figpath, figname)
+            fig_ccf.savefig(figfilename)
+            plt.close(fig_ccf)
 
+            # save line-by-line fitting figures
             fig_lbl_lst = result['fig_fitlbl']
             for ifig, fig_lbl in enumerate(fig_lbl_lst):
                 figname = 'linefit_lbl_{}_{:02d}.png'.format(
                             fileid, ifig+1)
-                fig_lbl.savefig(figname)
+                figfilename = os.path.join(self.figpath, figname)
+                fig_lbl.savefig(figfilename)
                 plt.close(fig_lbl)
 
+            # save wavelength solution figure
             fig_sol = result['fig_solution']
             title = '{} ({})'.format(fileid, lamp)
             fig_sol.suptitle(title)
@@ -1892,10 +1907,10 @@ class BFOSC(FOSCReducer):
     def _plot_onedspec(self, logitem):
 
         if logitem['mode'] == 'echelle':
-            _plot_onedspec_echelle(logitem)
+            self._plot_onedspec_echelle(logitem)
 
         elif logitem['mode'] == 'longslit':
-            _plot_onedspec_longslit(logitem)
+            self._plot_onedspec_longslit(logitem)
 
         else:
             return
@@ -2009,6 +2024,48 @@ class BFOSC(FOSCReducer):
                 m = self.logtable['fileid']==arg
                 logitem = self.logtable[m][0]
                 self._convert1d(logitem, filename)
+
+    def save(self, filename):
+        """ Save this session as a YAML file.
+
+        Args:
+            filename (str): filename of the YAML file
+
+        """
+        param = {
+                'raw_path': self.rawdata_path,
+                'fig_path': self.figpath,
+                'ods_path': self.odspath,
+                'obslog_file': self.obslogfile,
+                }
+        # write to yaml
+        with open(filename, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(param, f,
+                           allow_unicode      = True,
+                           sort_keys          = False,
+                           default_flow_style = False,
+                           )
+        
+
+    def read(self, filename):
+        """ Read this session from a YAML file.
+
+        Args:
+            filename (str): filename of the YAML file.
+        """
+
+        try:
+            with open(filename, 'r', encoding='utf-8') as file:
+                param = yaml.safe_load(file)
+                if param is None:
+                    param = {}
+        except FileNotFoundError:
+            print('File does not exist')
+            param = {}
+        except yaml.YAMLError as e:
+            print(f'YAML parsing error: {e}')
+            param = {}
+        
 
 
 def errfunc(p, x, y, fitfunc):
